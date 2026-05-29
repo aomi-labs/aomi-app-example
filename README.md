@@ -95,7 +95,7 @@ and expects a response of shape `{ "message": "…", "tool_calls": [ "get_fundin
 
 ## Design decisions
 
-**Repo placement.** Lives at `aomi-labs/aomi-hyperliquid-sample` so external developers can clone and build without checking out the SDK monorepo. The plugin source mirrors `aomi-sdk/apps/hyperliquid` but pins the SDK from crates.io (`aomi-sdk = "=0.1.19"`), not by path.
+**Repo placement.** Intended placement: `aomi-labs/aomi-hyperliquid-sample` — currently in transit. The plugin source is published as a stand-alone sample so external developers can clone and build without checking out the SDK monorepo. SDK is pinned from crates.io (`aomi-sdk = "=0.1.20"`), not by path.
 
 **Standalone UI.** The plan considered embedding `<AomiFrame />` from `@aomi-labs/react`. That package is currently ESM-only with React 18/19, `@assistant-ui/react`, `wagmi`, and `viem` as peer dependencies — it requires a build toolchain (Vite, Next.js, or similar) and is not loadable from a `<script>` tag. To keep the sample faithful to its "zero infra" promise the UI implements its own thin chat panel that calls the same `POST /chat` shape the widget would. When Aomi ships a CDN bundle of the widget, this sample can swap to it without changing the backend contract.
 

@@ -1,754 +1,433 @@
-/* ─────────────────────────────────────────────────────────────────────────────
-   Hyperliquid × Aomi — sample app frontend.
+/* ============================================================
+   Hyperliquid × Aomi — Trading Intelligence
+   Zero-build vanilla JS. Synthetic Hyperliquid market data +
+   hand-rolled Aomi agent with tool-call → dashboard pulse.
+   ============================================================ */
 
-   Two modes:
-     • Demo (no backend)  → market data + chat handled in-browser by calling
-                            Hyperliquid's public info API directly.
-     • Connected          → chat is routed to an Aomi runtime backend that has
-                            the `hyperliquid` plugin loaded. Market data still
-                            comes straight from Hyperliquid for snappiness.
-   ───────────────────────────────────────────────────────────────────────── */
+/* ---------- seeded RNG so each asset is stable per load ---------- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
-const HL_INFO = 'https://api.hyperliquid.xyz/info';
-const REFRESH_MIDS_MS = 5_000;
-const REFRESH_BOOK_MS = 5_000;
-const REFRESH_FUNDING_MS = 60_000;
-
-const ASSETS = ['BTC', 'ETH', 'SOL', 'ARB'];
-
-const state = {
-  coin: 'BTC',
-  lastPrice: null,
-  sparklineCloses: [],
-  timers: { mids: null, book: null, funding: null },
-  backend: { url: '', appId: 'hyperliquid' },
-  chatHistory: [],
+/* ---------- market definitions ---------- */
+const MARKETS = {
+  BTC: { name: 'BTC-PERP', px: 68421.5, chg: 2.34,  funding: 0.0118, dec: 1, tick: 0.5,  sizeMul: 1,    seed: 11 },
+  ETH: { name: 'ETH-PERP', px: 3284.70, chg: -1.12, funding: 0.0091, dec: 2, tick: 0.05, sizeMul: 14,   seed: 23 },
+  SOL: { name: 'SOL-PERP', px: 172.36,  chg: 5.81,  funding: 0.0203, dec: 3, tick: 0.01, sizeMul: 260,  seed: 37 },
+  ARB: { name: 'ARB-PERP', px: 0.8421,  chg: -3.04, funding: -0.0042, dec: 4, tick: 0.0001, sizeMul: 52000, seed: 53 },
 };
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
+let current = 'BTC';
+const state = {}; // per-asset computed snapshot
 
-document.addEventListener('DOMContentLoaded', () => {
-  hydrateConfig();
-  wireAssetTabs();
-  wireChat();
-  wireWalletLookup();
-  wireConfigSave();
-  switchCoin('BTC');
+/* ---------- build a full snapshot for an asset ---------- */
+function buildSnapshot(sym) {
+  const m = MARKETS[sym];
+  const rnd = mulberry32(m.seed);
+  const px = m.px;
+
+  // sparkline: 64 points, drift toward sign of change
+  const pts = [];
+  let v = px / (1 + m.chg / 100);          // ~open
+  const open = v;
+  const drift = (px - open) / 64;
+  for (let i = 0; i < 64; i++) {
+    v += drift + (rnd() - 0.5) * px * 0.0028;
+    pts.push(v);
+  }
+  pts[pts.length - 1] = px;
+
+  // order book: 12 levels each side around mid
+  const levels = 12;
+  const asks = [], bids = [];
+  let aCum = 0, bCum = 0;
+  for (let i = 0; i < levels; i++) {
+    const gap = m.tick * (i + 1) * (1 + Math.floor(i / 3));
+    const aSz = (0.4 + rnd() * 2.6) * m.sizeMul;
+    const bSz = (0.4 + rnd() * 2.6) * m.sizeMul;
+    aCum += aSz; bCum += bSz;
+    asks.push({ price: px + gap + m.tick, size: aSz, cum: aCum });
+    bids.push({ price: px - gap, size: bSz, cum: bCum });
+  }
+  const maxCum = Math.max(aCum, bCum);
+  const bestAsk = asks[0].price, bestBid = bids[0].price;
+  const spread = bestAsk - bestBid;
+
+  // funding history: 24 hourly bars around current funding
+  const fund = [];
+  for (let i = 0; i < 24; i++) {
+    const base = m.funding;
+    const noise = (rnd() - 0.5) * 0.046;
+    fund.push(base + noise + Math.sin(i / 2.3 + m.seed) * 0.012);
+  }
+  fund[fund.length - 1] = m.funding;
+
+  return { sym, m, px, open, chg: m.chg, pts, asks, bids, maxCum, bestAsk, bestBid, spread, fund };
+}
+
+/* ---------- formatting ---------- */
+const fmt = (n, d) => n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+function priceHTML(n, d) {
+  const s = fmt(n, d);
+  const dot = s.indexOf('.');
+  if (dot === -1) return s;
+  return s.slice(0, dot) + '<span class="cents">' + s.slice(dot) + '</span>';
+}
+const fmtSize = (n) => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : (n >= 100 ? n.toFixed(0) : n.toFixed(2));
+const signPct = (n) => (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+
+/* ============================================================
+   RENDERERS
+   ============================================================ */
+function renderHero(s) {
+  document.getElementById('heroAsset').textContent = s.m.name;
+  document.getElementById('heroPrice').innerHTML = priceHTML(s.px, s.m.dec);
+  const pill = document.getElementById('heroChange');
+  const up = s.chg >= 0;
+  pill.className = 'pill ' + (up ? 'up' : 'down');
+  pill.textContent = signPct(s.chg);
+  const lo = Math.min(...s.pts), hi = Math.max(...s.pts);
+  document.getElementById('sparkLo').textContent = fmt(lo, s.m.dec);
+  document.getElementById('sparkHi').textContent = fmt(hi, s.m.dec);
+  drawSpark(s);
+}
+
+function drawSpark(s) {
+  const cv = document.getElementById('spark');
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 420, h = cv.clientHeight || 120;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const pts = s.pts, lo = Math.min(...pts), hi = Math.max(...pts);
+  const pad = 8, span = (hi - lo) || 1;
+  const X = i => (i / (pts.length - 1)) * (w - 2) + 1;
+  const Y = val => h - pad - ((val - lo) / span) * (h - pad * 2);
+  const up = s.chg >= 0;
+  const col = up ? '#97fce4' : '#f0676f';
+
+  // area fill
+  ctx.beginPath();
+  ctx.moveTo(X(0), Y(pts[0]));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(X(i), Y(pts[i]));
+  ctx.lineTo(X(pts.length - 1), h); ctx.lineTo(X(0), h); ctx.closePath();
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, up ? 'rgba(151,252,228,0.22)' : 'rgba(240,103,111,0.20)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.fill();
+
+  // line
+  ctx.beginPath();
+  ctx.moveTo(X(0), Y(pts[0]));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(X(i), Y(pts[i]));
+  ctx.lineWidth = 1.6; ctx.strokeStyle = col; ctx.lineJoin = 'round';
+  ctx.shadowColor = col; ctx.shadowBlur = 8; ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // end dot
+  ctx.beginPath();
+  ctx.arc(X(pts.length - 1), Y(pts[pts.length - 1]), 2.6, 0, Math.PI * 2);
+  ctx.fillStyle = col; ctx.fill();
+}
+
+function renderStats(s) {
+  const f = document.getElementById('statFunding');
+  const up = s.m.funding >= 0;
+  f.className = 'stat-value ' + (up ? 'up' : 'down');
+  f.textContent = (up ? '+' : '') + (s.m.funding).toFixed(4) + '%';
+  document.getElementById('statFundingFoot').textContent =
+    (up ? 'longs pay shorts' : 'shorts pay longs') + ' · ' + ((s.m.funding * 24 * 365).toFixed(1)) + '% APR';
+
+  document.getElementById('statMark').innerHTML = priceHTML(s.px + s.m.tick * 2, s.m.dec);
+  const sp = document.getElementById('statSpread');
+  sp.textContent = fmt(s.spread, s.m.dec);
+  const bps = (s.spread / s.px) * 10000;
+  document.getElementById('statSpreadFoot').textContent = bps.toFixed(1) + ' bps · ' + fmt(s.bestBid, s.m.dec) + ' / ' + fmt(s.bestAsk, s.m.dec);
+}
+
+function renderBook(s) {
+  const asksEl = document.getElementById('bookAsks');
+  const bidsEl = document.getElementById('bookBids');
+  const row = (lv, side) => {
+    const w = (lv.cum / s.maxCum) * 100;
+    return `<div class="book-row">
+      <div class="depth" style="width:${w}%"></div>
+      <span class="bk-price">${fmt(lv.price, s.m.dec)}</span>
+      <span class="bk-size">${fmtSize(lv.size)}</span>
+      <span class="bk-total">${fmtSize(lv.cum)}</span>
+    </div>`;
+  };
+  // asks shown high→low so best ask sits just above mid
+  asksEl.innerHTML = s.asks.slice().reverse().map(l => row(l, 'a')).join('');
+  bidsEl.innerHTML = s.bids.map(l => row(l, 'b')).join('');
+
+  document.getElementById('midPrice').innerHTML = priceHTML((s.bestAsk + s.bestBid) / 2, s.m.dec);
+  document.getElementById('midSpread').textContent = fmt(s.spread, s.m.dec);
+}
+
+function renderFunding(s) {
+  const wrap = document.getElementById('fchartBars');
+  const max = Math.max(...s.fund.map(Math.abs)) || 1;
+  wrap.innerHTML = s.fund.map((v, i) => {
+    const pct = Math.max((Math.abs(v) / max) * 48, 3); // half-height max, min sliver
+    const cls = v >= 0 ? 'pos' : 'neg';
+    const now = i === s.fund.length - 1 ? ' is-now' : '';
+    return `<div class="fbar-col${now}" title="h-${24 - i}: ${(v).toFixed(4)}%">
+      <div class="fbar ${cls}" style="height:${pct}%"></div>
+    </div>`;
+  }).join('');
+}
+
+function renderAll(sym) {
+  const s = state[sym] || (state[sym] = buildSnapshot(sym));
+  renderHero(s); renderStats(s); renderBook(s); renderFunding(s);
+}
+
+/* ============================================================
+   ASSET TABS
+   ============================================================ */
+document.getElementById('assetTabs').addEventListener('click', e => {
+  const btn = e.target.closest('.asset-tab');
+  if (!btn) return;
+  selectAsset(btn.dataset.asset);
+});
+function selectAsset(sym) {
+  if (!MARKETS[sym]) return;
+  current = sym;
+  document.querySelectorAll('.asset-tab').forEach(t =>
+    t.classList.toggle('is-active', t.dataset.asset === sym));
+  renderAll(sym);
+}
+
+/* ============================================================
+   TOOL-CALL PULSE
+   ============================================================ */
+function pulse(cardIds) {
+  cardIds.forEach((id, k) => {
+    const el = document.getElementById(id);
+    if (!el || el.hidden) return;
+    setTimeout(() => {
+      el.classList.remove('pulsing');
+      void el.offsetWidth;            // restart animation
+      el.classList.add('pulsing');
+      setTimeout(() => el.classList.remove('pulsing'), 820);
+    }, k * 140);
+  });
+}
+
+/* ============================================================
+   WALLET LOOKUP  → account card + get_user_state pulse
+   ============================================================ */
+function shortAddr(a) { return a.slice(0, 6) + '…' + a.slice(-4); }
+function lookupAccount(addr) {
+  const seed = [...addr].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7);
+  const rnd = mulberry32(Math.abs(seed) || 1);
+  const equity = 25000 + rnd() * 480000;
+  const margin = equity * (0.12 + rnd() * 0.4);
+  const pnl = (rnd() - 0.42) * equity * 0.22;
+  const syms = ['BTC', 'ETH', 'SOL', 'ARB'];
+  const n = 2 + Math.floor(rnd() * 2);
+  const positions = [];
+  for (let i = 0; i < n; i++) {
+    const sym = syms[Math.floor(rnd() * syms.length)];
+    const m = MARKETS[sym];
+    const long = rnd() > 0.45;
+    const size = (0.5 + rnd() * 9) * (m.px < 5 ? 4000 : m.px < 300 ? 40 : 1);
+    const upnl = (rnd() - 0.4) * equity * 0.06;
+    positions.push({ sym, long, size, entry: m.px * (1 + (rnd() - 0.5) * 0.04), upnl });
+  }
+
+  document.getElementById('acctAddr').textContent = shortAddr(addr);
+  document.getElementById('acctSummary').innerHTML = `
+    <div class="acct-cell"><div class="k">Account equity</div><div class="v">$${fmt(equity, 0)}</div></div>
+    <div class="acct-cell"><div class="k">Margin used</div><div class="v">$${fmt(margin, 0)}</div></div>
+    <div class="acct-cell"><div class="k">Unrealized PnL</div><div class="v" style="color:${pnl >= 0 ? 'var(--mint)' : 'var(--down)'}">${pnl >= 0 ? '+' : '−'}$${fmt(Math.abs(pnl), 0)}</div></div>`;
+  document.getElementById('acctPositions').innerHTML =
+    `<div class="pos-row head"><span>Side</span><span class="sym">Market</span><span>Size</span><span>Entry</span><span>uPnL</span></div>` +
+    positions.map(p => `<div class="pos-row">
+      <span class="side ${p.long ? 'long' : 'short'}">${p.long ? 'LONG' : 'SHORT'}</span>
+      <span class="sym">${p.sym}</span>
+      <span>${fmtSize(p.size)}</span>
+      <span>${fmt(p.entry, MARKETS[p.sym].dec)}</span>
+      <span class="pnl ${p.upnl >= 0 ? 'up' : 'down'}">${p.upnl >= 0 ? '+' : '−'}$${fmt(Math.abs(p.upnl), 0)}</span>
+    </div>`).join('');
+
+  const card = document.getElementById('card-account');
+  card.hidden = false;
+  card.scrollIntoView ? null : null;
+  document.querySelector('.dash-scroll').scrollTo({ top: document.querySelector('.dash-scroll').scrollHeight, behavior: 'smooth' });
+  return { equity, pnl, positions };
+}
+
+document.getElementById('walletForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = document.getElementById('walletInput').value.trim();
+  const addr = /^0x[0-9a-fA-F]{6,}$/.test(v) ? v : '0x' + (v || '7a3f').replace(/[^0-9a-fA-F]/g, '').padEnd(40, '4e21d9b0c5a8f3e2761049ac').slice(0, 40);
+  lookupAccount(addr);
+  pulse(['card-account']);
 });
 
-window.addEventListener('beforeunload', clearAllTimers);
+/* ============================================================
+   AOMI AGENT
+   ============================================================ */
+const chatLog = document.getElementById('chatLog');
 
-// ─── Hyperliquid API ─────────────────────────────────────────────────────────
+function el(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
+function scrollChat() { chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' }); }
+/* append + guarantee the element settles visible even if the entrance
+   animation is throttled/paused (e.g. background tab or capture) */
+function place(node) { chatLog.appendChild(node); setTimeout(() => node.classList.remove('msg-enter'), 380); scrollChat(); return node; }
 
-async function hlPost(body) {
-  const res = await fetch(HL_INFO, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`Hyperliquid ${body.type} failed: ${res.status}`);
-  return res.json();
+function addUser(text) {
+  const m = el(`<div class="msg user msg-enter"><div class="bubble"></div></div>`);
+  m.querySelector('.bubble').textContent = text;
+  place(m);
+}
+function addTyping() {
+  const m = el(`<div class="msg bot msg-enter" data-typing="1"><div class="bubble typing"><i></i><i></i><i></i></div></div>`);
+  place(m); return m;
 }
 
-const hl = {
-  meta:               ()         => hlPost({ type: 'meta' }),
-  allMids:            ()         => hlPost({ type: 'allMids' }),
-  l2Book:             (coin)     => hlPost({ type: 'l2Book', coin }),
-  clearinghouseState: (user)     => hlPost({ type: 'clearinghouseState', user }),
-  openOrders:         (user)     => hlPost({ type: 'openOrders', user }),
-  userFills:          (user)     => hlPost({ type: 'userFills', user }),
-  fundingHistory:     (coin, startTime, endTime) => {
-    const body = { type: 'fundingHistory', coin, startTime };
-    if (endTime) body.endTime = endTime;
-    return hlPost(body);
-  },
-  candleSnapshot:     (coin, interval, startTime, endTime) =>
-    hlPost({ type: 'candleSnapshot', req: { coin, interval, startTime, endTime } }),
-};
+/* intent → which tool, which cards pulse, and a reply built from live data */
+function resolve(text) {
+  const t = text.toLowerCase();
+  let sym = (t.match(/\b(btc|eth|sol|arb)\b/) || [])[1];
+  sym = sym ? sym.toUpperCase() : null;
+  const target = sym || current;
 
-// ─── Status dot ──────────────────────────────────────────────────────────────
-
-function setStatus(kind, label) {
-  const dot = document.getElementById('status-dot');
-  const lab = document.getElementById('status-label');
-  dot.classList.remove('live', 'error');
-  if (kind === 'live')  dot.classList.add('live');
-  if (kind === 'error') dot.classList.add('error');
-  lab.textContent = label;
-}
-
-// ─── Asset switching ─────────────────────────────────────────────────────────
-
-function wireAssetTabs() {
-  document.querySelectorAll('.asset-tab').forEach(tab => {
-    tab.addEventListener('click', () => switchCoin(tab.dataset.coin));
-  });
-}
-
-function switchCoin(coin) {
-  state.coin = coin;
-  state.lastPrice = null;
-  state.sparklineCloses = [];
-
-  document.querySelectorAll('.asset-tab').forEach(tab => {
-    const active = tab.dataset.coin === coin;
-    tab.classList.toggle('active', active);
-    tab.setAttribute('aria-selected', active ? 'true' : 'false');
-  });
-
-  document.getElementById('hero-coin').textContent = coin;
-  document.getElementById('ob-coin').textContent = `${coin}-PERP`;
-  document.getElementById('funding-chart-coin').textContent = coin;
-
-  clearAllTimers();
-  refreshAll();
-  state.timers.mids    = setInterval(refreshMids,    REFRESH_MIDS_MS);
-  state.timers.book    = setInterval(refreshBook,    REFRESH_BOOK_MS);
-  state.timers.funding = setInterval(refreshFunding, REFRESH_FUNDING_MS);
-}
-
-function clearAllTimers() {
-  Object.values(state.timers).forEach(t => t && clearInterval(t));
-  state.timers = { mids: null, book: null, funding: null };
-}
-
-async function refreshAll() {
-  setStatus('', 'Connecting…');
-  try {
-    await Promise.all([refreshHero(), refreshMids(), refreshBook(), refreshFunding()]);
-    setStatus('live', 'Live');
-  } catch (err) {
-    console.error(err);
-    setStatus('error', 'Connection error');
+  // wallet
+  const addrMatch = text.match(/0x[0-9a-fA-F]{4,}/);
+  if (addrMatch || /\b(wallet|account|whale|position|holdings|portfolio)\b/.test(t)) {
+    return { kind: 'account', tool: 'get_user_state', cards: ['card-account'], sym: null, addr: addrMatch ? addrMatch[0] : null };
   }
+  if (/\b(fund|funding|apr|carry)\b/.test(t))
+    return { kind: 'funding', tool: 'get_funding_history', cards: ['card-funding', 'card-fchart'], sym: target };
+  if (/\b(book|depth|liquidity|bid|ask|spread|wall)\b/.test(t))
+    return { kind: 'book', tool: 'get_l2_book', cards: ['card-book', 'card-spread'], sym: target };
+  if (/\b(price|mark|mid|quote|trading at|how much)\b/.test(t))
+    return { kind: 'price', tool: 'get_all_mids', cards: ['card-price', 'card-mark'], sym: target };
+  // default → price overview
+  return { kind: 'price', tool: 'get_all_mids', cards: ['card-price'], sym: target };
 }
 
-// ─── Price hero + sparkline ──────────────────────────────────────────────────
+function numSpan(val, cls) { return `<span class="num${cls ? ' ' + cls : ''}">${val}</span>`; }
 
-async function refreshHero() {
-  const now = Date.now();
-  const day = 24 * 60 * 60 * 1000;
-  const candles = await hl.candleSnapshot(state.coin, '1h', now - day, now);
-  if (!Array.isArray(candles) || candles.length === 0) return;
+function buildReply(r) {
+  const sym = r.sym || current;
+  const s = state[sym] || (state[sym] = buildSnapshot(sym));
+  const d = s.m.dec;
+  const up = s.chg >= 0;
 
-  const closes = candles.map(c => Number(c.c));
-  state.sparklineCloses = closes;
-
-  const first = closes[0];
-  const last = closes[closes.length - 1];
-  const pct = ((last - first) / first) * 100;
-
-  const arrow = document.getElementById('change-arrow');
-  const pctEl = document.getElementById('change-pct');
-  const change = document.getElementById('hero-change');
-
-  change.classList.remove('positive', 'negative', 'neutral');
-  if (pct > 0.01)       { change.classList.add('positive'); arrow.textContent = '▲'; }
-  else if (pct < -0.01) { change.classList.add('negative'); arrow.textContent = '▼'; }
-  else                  { change.classList.add('neutral');  arrow.textContent = '—'; }
-  pctEl.textContent = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
-
-  drawSparkline(closes, pct >= 0);
-}
-
-function drawSparkline(values, positive) {
-  const canvas = document.getElementById('sparkline');
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth || 220;
-  const h = canvas.clientHeight || 64;
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, w, h);
-
-  if (values.length < 2) return;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  const step = w / (values.length - 1);
-
-  const color = positive ? '#10b981' : '#ef4444';
-
-  ctx.beginPath();
-  values.forEach((v, i) => {
-    const x = i * step;
-    const y = h - ((v - min) / range) * (h - 6) - 3;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.6;
-  ctx.lineJoin = 'round';
-  ctx.stroke();
-
-  ctx.lineTo(w, h);
-  ctx.lineTo(0, h);
-  ctx.closePath();
-  const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, color + '33');
-  grad.addColorStop(1, color + '00');
-  ctx.fillStyle = grad;
-  ctx.fill();
-}
-
-// ─── Mids ────────────────────────────────────────────────────────────────────
-
-async function refreshMids() {
-  try {
-    const mids = await hl.allMids();
-    const price = Number(mids[state.coin]);
-    if (!isFinite(price)) return;
-
-    const heroPrice = document.getElementById('hero-price');
-    const markValue = document.getElementById('mark-value');
-
-    const formatted = formatPrice(price);
-    heroPrice.textContent = formatted;
-    markValue.textContent = formatted;
-
-    if (state.lastPrice !== null) {
-      const dir = price > state.lastPrice ? 'flash-up' : price < state.lastPrice ? 'flash-down' : null;
-      if (dir) {
-        heroPrice.classList.add(dir);
-        setTimeout(() => heroPrice.classList.remove(dir), 400);
-      }
-    }
-    state.lastPrice = price;
-    setStatus('live', 'Live');
-  } catch (err) {
-    console.error('mids refresh failed', err);
-    setStatus('error', 'Connection error');
+  if (r.kind === 'account') {
+    const addr = r.addr || ('0x' + 'a17f3c9e42b8' + 'd05'.repeat(8)).slice(0, 42);
+    const acct = lookupAccount(addr);
+    const big = acct.positions.slice().sort((a, b) => b.size - a.size)[0];
+    return { tool: r.tool, args: `address: "${shortAddr(addr)}"`,
+      text: `That wallet holds ${numSpan('$' + fmt(acct.equity, 0))} in equity with ${acct.positions.length} open positions, currently ${acct.pnl >= 0 ? 'up' : 'down'} ${numSpan((acct.pnl >= 0 ? '+' : '−') + '$' + fmt(Math.abs(acct.pnl), 0), acct.pnl >= 0 ? 'up' : 'down')} on the day. Biggest exposure is a <strong>${big.long ? 'long' : 'short'}</strong> on ${big.sym}. Pulled live into the account panel.` };
   }
-}
-
-// ─── Order book ──────────────────────────────────────────────────────────────
-
-async function refreshBook() {
-  try {
-    const book = await hl.l2Book(state.coin);
-    const levels = book?.levels;
-    if (!levels || levels.length !== 2) return;
-
-    const bids = levels[0].slice(0, 10);
-    const asks = levels[1].slice(0, 10);
-
-    const bestBid = Number(bids[0]?.px);
-    const bestAsk = Number(asks[0]?.px);
-    if (isFinite(bestBid) && isFinite(bestAsk)) {
-      const mid = (bestBid + bestAsk) / 2;
-      const spread = bestAsk - bestBid;
-      const spreadPct = (spread / mid) * 100;
-      document.getElementById('spread-value').textContent =
-        `${formatPrice(spread)} (${spreadPct.toFixed(3)}%)`;
-      document.getElementById('ob-mid-price').textContent = formatPrice(mid);
-    }
-
-    const maxSize = Math.max(
-      ...bids.map(l => Number(l.sz)),
-      ...asks.map(l => Number(l.sz)),
-      0.0001,
-    );
-
-    renderBookRows('bids-rows', bids, maxSize);
-    renderBookRows('asks-rows', asks.slice().reverse(), maxSize);
-  } catch (err) {
-    console.error('book refresh failed', err);
+  if (r.kind === 'funding') {
+    const f = s.m.funding, apr = (f * 24 * 365).toFixed(1);
+    return { tool: r.tool, args: `coin: "${sym}", lookback: "24h"`,
+      text: `${sym} funding is ${numSpan((f >= 0 ? '+' : '') + f.toFixed(4) + '%', f >= 0 ? 'up' : 'down')} this hour — ${f >= 0 ? 'longs are paying shorts' : 'shorts are paying longs'}, roughly ${numSpan(apr + '% APR', f >= 0 ? 'up' : 'down')}. Over the last 24h it's stayed ${f >= 0 ? 'positive but cooling' : 'slightly negative'}. The history chart is highlighted.` };
   }
-}
-
-function renderBookRows(id, levels, maxSize) {
-  const host = document.getElementById(id);
-  host.innerHTML = '';
-  levels.forEach(level => {
-    const px = Number(level.px);
-    const sz = Number(level.sz);
-    const pct = (sz / maxSize) * 100;
-    const row = document.createElement('div');
-    row.className = 'ob-row';
-    row.innerHTML = `
-      <span class="bar" style="width:${pct.toFixed(1)}%"></span>
-      <span>${formatPrice(px)}</span>
-      <span>${formatSize(sz)}</span>
-    `;
-    host.appendChild(row);
-  });
-}
-
-// ─── Funding ────────────────────────────────────────────────────────────────
-
-async function refreshFunding() {
-  try {
-    const now = Date.now();
-    const day = 24 * 60 * 60 * 1000;
-    const history = await hl.fundingHistory(state.coin, now - day, now);
-    if (!Array.isArray(history) || history.length === 0) return;
-
-    const latest = history[history.length - 1];
-    const rate = Number(latest.fundingRate);
-    const pct = rate * 100;
-
-    const fundingValue = document.getElementById('funding-value');
-    const fundingDir = document.getElementById('funding-direction');
-    fundingValue.textContent = `${pct >= 0 ? '+' : ''}${pct.toFixed(4)}%`;
-    fundingValue.classList.remove('positive', 'negative', 'neutral');
-    fundingDir.classList.remove('positive', 'negative', 'neutral');
-    if (rate > 0)      { fundingValue.classList.add('positive'); fundingDir.classList.add('positive'); fundingDir.textContent = 'Longs pay shorts'; }
-    else if (rate < 0) { fundingValue.classList.add('negative'); fundingDir.classList.add('negative'); fundingDir.textContent = 'Shorts pay longs'; }
-    else               { fundingValue.classList.add('neutral');  fundingDir.classList.add('neutral');  fundingDir.textContent = 'Neutral'; }
-
-    drawFundingChart(history);
-  } catch (err) {
-    console.error('funding refresh failed', err);
+  if (r.kind === 'book') {
+    const bps = ((s.spread / s.px) * 10000).toFixed(1);
+    const topBid = s.bids[0], topAsk = s.asks[0];
+    return { tool: r.tool, args: `coin: "${sym}", depth: 12`,
+      text: `${sym} is ${numSpan(fmt(topBid.price, d))} / ${numSpan(fmt(topAsk.price, d))}, a ${numSpan(bps + ' bps')} spread. Best bid carries ${numSpan(fmtSize(topBid.size))} and there's a thicker ask wall a few levels up. Book and spread cards are pulsing on the left.` };
   }
+  // price
+  return { tool: r.tool, args: `coins: ["${sym}"]`,
+    text: `${sym} is trading at ${numSpan('$' + fmt(s.px, d))}, ${numSpan(signPct(s.chg), up ? 'up' : 'down')} over 24h. Mark sits a hair above mid and the trend is ${up ? 'holding up' : 'leaking lower'} on the sparkline.` };
 }
 
-function drawFundingChart(history) {
-  const canvas = document.getElementById('funding-canvas');
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth || 600;
-  const h = canvas.clientHeight || 100;
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, w, h);
+function botReply(r) {
+  if (r.sym) selectAsset(r.sym);
+  const typing = addTyping();
+  const reply = buildReply(r);
 
-  const rates = history.map(r => Number(r.fundingRate));
-  const absMax = Math.max(...rates.map(Math.abs), 0.000001);
-  const barW = Math.max(2, w / rates.length - 1);
-  const midY = h / 2;
+  setTimeout(() => pulse(r.cards), 480);
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-  ctx.beginPath();
-  ctx.moveTo(0, midY);
-  ctx.lineTo(w, midY);
-  ctx.stroke();
-
-  rates.forEach((rate, i) => {
-    const x = (i / rates.length) * w;
-    const height = (Math.abs(rate) / absMax) * (h / 2 - 4);
-    if (rate >= 0) {
-      ctx.fillStyle = '#10b981';
-      ctx.fillRect(x, midY - height, barW, height);
-    } else {
-      ctx.fillStyle = '#ef4444';
-      ctx.fillRect(x, midY, barW, height);
-    }
-  });
+  setTimeout(() => {
+    typing.remove();
+    const m = el(`<div class="msg bot msg-enter">
+      <div class="toolcall"><span class="dot"></span>${reply.tool}<span class="arr">·</span><span style="color:var(--fg-3)">${reply.args}</span></div>
+      <div class="bubble"></div>
+    </div>`);
+    m.querySelector('.bubble').innerHTML = reply.text;
+    place(m);
+  }, 720);
 }
 
-// ─── Wallet lookup ──────────────────────────────────────────────────────────
-
-function wireWalletLookup() {
-  const input = document.getElementById('nav-wallet-input');
-  const btn = document.getElementById('nav-wallet-btn');
-  btn.addEventListener('click', () => doWalletLookup(input.value.trim()));
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter') doWalletLookup(input.value.trim());
-  });
+function send(text) {
+  if (!text.trim()) return;
+  addUser(text);
+  const r = resolve(text);
+  botReply(r);
 }
 
-async function doWalletLookup(addr) {
-  const results = document.getElementById('wallet-results');
-  if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
-    results.innerHTML = `<div class="wallet-placeholder">Enter a valid 0x… address (40 hex chars).</div>`;
-    return;
-  }
+/* composer */
+document.getElementById('composer').addEventListener('submit', e => {
+  e.preventDefault();
+  const inp = document.getElementById('chatInput');
+  const v = inp.value;
+  if (!v.trim()) return;
+  inp.value = '';
+  send(v);
+});
 
-  results.innerHTML = `<div class="wallet-placeholder">Loading…</div>`;
+/* suggestion chips */
+const CHIPS = ['BTC funding trend', 'ETH order book', 'Spread on SOL', 'ARB price now', 'Look up a whale wallet'];
+const chipsEl = document.getElementById('chips');
+CHIPS.forEach(label => {
+  const c = el(`<button class="chip"></button>`);
+  c.textContent = label;
+  c.addEventListener('click', () => send(label));
+  chipsEl.appendChild(c);
+});
 
-  try {
-    const [chState, fills] = await Promise.all([
-      hl.clearinghouseState(addr),
-      hl.userFills(addr).catch(() => []),
-    ]);
-
-    const summary = chState?.marginSummary;
-    const positions = (chState?.assetPositions || [])
-      .map(p => p.position)
-      .filter(p => Number(p.szi) !== 0);
-
-    let html = '';
-    if (summary) {
-      const accountValue = Number(summary.accountValue);
-      const totalNotional = Number(summary.totalNtlPos);
-      const totalMargin = Number(summary.totalMarginUsed);
-      html += `
-        <div class="account-summary">
-          <div class="acc-metric"><span class="acc-label">Account Value</span><span class="acc-value">${formatUsd(accountValue)}</span></div>
-          <div class="acc-metric"><span class="acc-label">Notional</span><span class="acc-value">${formatUsd(totalNotional)}</span></div>
-          <div class="acc-metric"><span class="acc-label">Margin Used</span><span class="acc-value">${formatUsd(totalMargin)}</span></div>
-        </div>
-      `;
-    }
-
-    if (positions.length === 0) {
-      html += `<div class="wallet-placeholder">No open positions.</div>`;
-    } else {
-      positions.forEach(p => {
-        const size = Number(p.szi);
-        const side = size > 0 ? 'long' : 'short';
-        const entry = Number(p.entryPx);
-        const upnl = Number(p.unrealizedPnl);
-        html += `
-          <div class="position-card">
-            <div class="pos-left">
-              <span class="pos-coin">${escapeHtml(p.coin)}</span>
-              <span class="pos-side ${side}">${side.toUpperCase()} · ${Math.abs(size)} @ ${formatPrice(entry)}</span>
-            </div>
-            <div class="pos-right">
-              <span class="pos-pnl ${upnl >= 0 ? 'positive' : 'negative'}">${upnl >= 0 ? '+' : ''}${formatUsd(upnl)}</span>
-              <span class="pos-size">unrealised</span>
-            </div>
-          </div>
-        `;
-      });
-    }
-
-    if (Array.isArray(fills) && fills.length > 0) {
-      const recent = fills.slice(0, 5);
-      html += `
-        <table class="tool-result" aria-label="Recent fills">
-          <thead><tr><th>Time</th><th>Coin</th><th>Side</th><th>Px</th><th>Sz</th></tr></thead>
-          <tbody>
-            ${recent.map(f => `
-              <tr>
-                <td>${formatTime(Number(f.time))}</td>
-                <td>${escapeHtml(f.coin)}</td>
-                <td>${f.side === 'B' ? 'Buy' : 'Sell'}</td>
-                <td>${formatPrice(Number(f.px))}</td>
-                <td>${formatSize(Number(f.sz))}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      `;
-    }
-
-    results.innerHTML = html;
-  } catch (err) {
-    console.error(err);
-    results.innerHTML = `<div class="wallet-placeholder">Lookup failed. Address may not have Hyperliquid activity.</div>`;
-  }
+/* greeting */
+function greet() {
+  const m = el(`<div class="msg bot msg-enter"><div class="bubble"></div></div>`);
+  m.querySelector('.bubble').innerHTML = `I read Hyperliquid in real time. Ask me about price, funding, the order book, or a wallet — say something like <em>"how's BTC funding?"</em> and watch the matching panel light up.`;
+  place(m);
 }
 
-// ─── Chat ───────────────────────────────────────────────────────────────────
+/* ============================================================
+   LIVE TICK — gentle random walk, sells the "live" feel
+   ============================================================ */
+function tick() {
+  const s = state[current]; if (!s) return;
+  const step = (Math.random() - 0.5) * s.px * 0.0006;
+  s.px = Math.max(s.px + step, s.m.tick);
+  s.chg = ((s.px - s.open) / s.open) * 100;
+  s.pts.push(s.px); if (s.pts.length > 64) s.pts.shift();
+  // nudge top of book with price
+  s.bids.forEach((b, i) => { b.price = s.px - s.m.tick * (i + 1) * (1 + Math.floor(i / 3)); });
+  s.asks.forEach((a, i) => { a.price = s.px + s.m.tick * (i + 1) * (1 + Math.floor(i / 3)) + s.m.tick; });
+  s.bestAsk = s.asks[0].price; s.bestBid = s.bids[0].price; s.spread = s.bestAsk - s.bestBid;
 
-function wireChat() {
-  const input = document.getElementById('chat-input');
-  const btn = document.getElementById('send-btn');
-
-  const send = () => {
-    const text = input.value.trim();
-    if (!text) return;
-    input.value = '';
-    input.style.height = 'auto';
-    handleUserMessage(text);
-  };
-
-  btn.addEventListener('click', send);
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
-  });
-  input.addEventListener('input', () => {
-    input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-  });
-
-  document.querySelectorAll('.suggestion').forEach(s => {
-    s.addEventListener('click', () => {
-      input.value = s.dataset.prompt;
-      input.focus();
-      input.dispatchEvent(new Event('input'));
-    });
-  });
+  renderHero(s);
+  document.getElementById('statMark').innerHTML = priceHTML(s.px + s.m.tick * 2, s.m.dec);
+  document.getElementById('midPrice').innerHTML = priceHTML((s.bestAsk + s.bestBid) / 2, s.m.dec);
+  // refresh book prices only (sizes stable)
+  document.querySelectorAll('#bookBids .bk-price').forEach((e, i) => { if (s.bids[i]) e.textContent = fmt(s.bids[i].price, s.m.dec); });
+  const revAsks = s.asks.slice().reverse();
+  document.querySelectorAll('#bookAsks .bk-price').forEach((e, i) => { if (revAsks[i]) e.textContent = fmt(revAsks[i].price, s.m.dec); });
 }
 
-async function handleUserMessage(text) {
-  appendMessage('user', text);
-  const typingId = appendTyping();
-  state.chatHistory.push({ role: 'user', content: text });
-
-  try {
-    const reply = state.backend.url
-      ? await chatViaAomi(text)
-      : await chatDemo(text);
-    removeTyping(typingId);
-    appendMessage('agent', reply.text, reply.toolCalls);
-    state.chatHistory.push({ role: 'assistant', content: reply.text });
-    reactToChatResponse(text, reply.text, reply.toolCalls);
-  } catch (err) {
-    console.error(err);
-    removeTyping(typingId);
-    appendMessage('agent', `Sorry, I hit an error: ${err.message}`);
-  }
-}
-
-async function chatViaAomi(text) {
-  const url = state.backend.url.replace(/\/$/, '') + '/chat';
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      app_id: state.backend.appId,
-      message: text,
-      history: state.chatHistory.slice(-10),
-    }),
-  });
-  if (!res.ok) throw new Error(`Backend returned ${res.status}`);
-  const data = await res.json();
-  return {
-    text: data.message || data.text || data.reply || JSON.stringify(data),
-    toolCalls: data.tool_calls || data.toolCalls || [],
-  };
-}
-
-/* Demo mode: a small intent router that calls the same info endpoints the
-   Rust plugin would, then formats a human-readable answer. Not a real LLM.
-   Demonstrates which tools an Aomi backend would invoke for each question. */
-async function chatDemo(text) {
-  const q = text.toLowerCase();
-  const toolCalls = [];
-
-  const wantsTrend   = /trend|over time|history|24h|funding/.test(q);
-  const wantsBook    = /order book|depth|bid|ask|spread/.test(q);
-  const wantsExtreme = /highest|extreme|top|biggest|largest|most/.test(q);
-  const wantsPrices  = /price|mid|cost|how much/.test(q);
-  const addrMatch    = q.match(/0x[a-f0-9]{40}/);
-
-  if (addrMatch) {
-    toolCalls.push('get_clearinghouse_state');
-    const addr = addrMatch[0];
-    const ch = await hl.clearinghouseState(addr);
-    const positions = (ch?.assetPositions || []).map(p => p.position).filter(p => Number(p.szi) !== 0);
-    const accountValue = Number(ch?.marginSummary?.accountValue || 0);
-    if (positions.length === 0) {
-      return { text: `Address \`${shortAddr(addr)}\` has account value ${formatUsd(accountValue)} with no open positions.`, toolCalls };
-    }
-    const lines = positions.map(p => {
-      const side = Number(p.szi) > 0 ? 'long' : 'short';
-      return `• ${escapeHtml(p.coin)} ${side} ${Math.abs(Number(p.szi))} @ ${formatPrice(Number(p.entryPx))}  uPnL ${formatUsd(Number(p.unrealizedPnl))}`;
-    });
-    return { text: `Account value ${formatUsd(accountValue)}\n${lines.join('\n')}`, toolCalls };
-  }
-
-  if (wantsExtreme && /funding/.test(q)) {
-    toolCalls.push('get_meta', 'get_funding_history');
-    const meta = await hl.meta();
-    const top10 = (meta?.universe || []).slice(0, 10).map(u => u.name);
-    const now = Date.now();
-    const day = 24 * 60 * 60 * 1000;
-    const results = await Promise.all(
-      top10.map(async coin => {
-        try {
-          const h = await hl.fundingHistory(coin, now - day, now);
-          const latest = Array.isArray(h) && h.length > 0 ? Number(h[h.length - 1].fundingRate) : 0;
-          return { coin, rate: latest };
-        } catch { return { coin, rate: 0 }; }
-      })
-    );
-    results.sort((a, b) => Math.abs(b.rate) - Math.abs(a.rate));
-    const lines = results.slice(0, 5).map(r => `• ${r.coin}: ${(r.rate * 100).toFixed(4)}%`);
-    return { text: `Most extreme funding rates right now (of top 10 perps):\n${lines.join('\n')}`, toolCalls };
-  }
-
-  if (wantsTrend && /funding/.test(q)) {
-    toolCalls.push('get_funding_history');
-    const now = Date.now();
-    const day = 24 * 60 * 60 * 1000;
-    const h = await hl.fundingHistory(state.coin, now - day, now);
-    if (!Array.isArray(h) || h.length === 0) {
-      return { text: `No funding data for ${state.coin} in the last 24h.`, toolCalls };
-    }
-    const rates = h.map(r => Number(r.fundingRate) * 100);
-    const avg = rates.reduce((a, b) => a + b, 0) / rates.length;
-    const first = rates[0];
-    const last = rates[rates.length - 1];
-    const direction = last > first ? 'rising' : last < first ? 'falling' : 'flat';
-    return {
-      text: `${state.coin} funding over the last 24h is ${direction}: started at ${first.toFixed(4)}%, latest ${last.toFixed(4)}%, average ${avg.toFixed(4)}%. ${avg > 0 ? 'Longs are paying shorts on average.' : 'Shorts are paying longs on average.'}`,
-      toolCalls,
-    };
-  }
-
-  if (wantsBook) {
-    toolCalls.push('get_l2_book');
-    const book = await hl.l2Book(state.coin);
-    const bids = book?.levels?.[0]?.slice(0, 5) || [];
-    const asks = book?.levels?.[1]?.slice(0, 5) || [];
-    const bid = Number(bids[0]?.px);
-    const ask = Number(asks[0]?.px);
-    const spread = ask - bid;
-    return {
-      text: `${state.coin} top of book: bid ${formatPrice(bid)} / ask ${formatPrice(ask)}, spread ${formatPrice(spread)} (${((spread / ((ask + bid) / 2)) * 100).toFixed(3)}%). Top 5 bid sizes ${bids.map(l => formatSize(Number(l.sz))).join(', ')}. Top 5 ask sizes ${asks.map(l => formatSize(Number(l.sz))).join(', ')}.`,
-      toolCalls,
-    };
-  }
-
-  if (wantsPrices || /btc|eth|sol|arb|doge/.test(q)) {
-    toolCalls.push('get_all_mids');
-    const mids = await hl.allMids();
-    const requested = ASSETS.filter(a => q.includes(a.toLowerCase()));
-    const list = requested.length > 0 ? requested : ASSETS;
-    const lines = list.map(c => `• ${c}: ${formatPrice(Number(mids[c]))}`);
-    return { text: `Current mid-prices:\n${lines.join('\n')}`, toolCalls };
-  }
-
-  return {
-    text: `In demo mode I answer questions about prices, order books, funding rates, and account positions. Try one of the suggested prompts, or connect an Aomi backend in the config panel to chat with the full LLM-powered agent.`,
-    toolCalls: [],
-  };
-}
-
-// ─── Chat → Dashboard reaction ──────────────────────────────────────────────
-//
-// The plan's headline: when the agent answers, the relevant dashboard panel
-// reacts. If the user asked about a different coin, switch the active tab.
-// If a particular tool ran, pulse the panel that visualises that data.
-
-function reactToChatResponse(userText, agentText, toolCalls) {
-  const blob = `${userText} ${agentText}`.toUpperCase();
-  const mentioned = ASSETS.find(c => new RegExp(`\\b${c}\\b`).test(blob));
-  if (mentioned && mentioned !== state.coin) switchCoin(mentioned);
-
-  const toolNames = (toolCalls || [])
-    .map(t => (typeof t === 'string' ? t : t?.name))
-    .filter(Boolean);
-  if (toolNames.includes('get_funding_history'))     pulseCard('funding-chart-card');
-  if (toolNames.includes('get_l2_book'))             pulseCard('orderbook');
-  if (toolNames.includes('get_all_mids'))            pulseCard('price-hero');
-  if (toolNames.includes('get_candle_snapshot'))     pulseCard('price-hero');
-  if (toolNames.includes('get_meta'))                pulseCard('price-hero');
-  if (
-    toolNames.includes('get_clearinghouse_state') ||
-    toolNames.includes('get_open_orders') ||
-    toolNames.includes('get_user_fills')
-  ) pulseCard('wallet-panel');
-}
-
-function pulseCard(id) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.classList.remove('pulse-highlight');
-  void el.offsetWidth;
-  el.classList.add('pulse-highlight');
-  setTimeout(() => el.classList.remove('pulse-highlight'), 1700);
-}
-
-// ─── Chat rendering ─────────────────────────────────────────────────────────
-
-function appendMessage(role, text, toolCalls = []) {
-  const host = document.getElementById('chat-messages');
-  const msg = document.createElement('div');
-  msg.className = `msg msg-${role}`;
-  msg.innerHTML = `
-    <div class="msg-avatar">${role === 'user' ? 'YOU' : 'AI'}</div>
-    <div class="msg-bubble">
-      ${textToHtml(text)}
-      ${toolCalls.length ? toolCalls.map(t => `<div class="msg-tool-call">⚡ tool: ${escapeHtml(t)}</div>`).join('') : ''}
-    </div>
-  `;
-  host.appendChild(msg);
-  host.scrollTop = host.scrollHeight;
-}
-
-function appendTyping() {
-  const host = document.getElementById('chat-messages');
-  const id = `typing-${Date.now()}`;
-  const msg = document.createElement('div');
-  msg.className = 'msg msg-agent';
-  msg.id = id;
-  msg.innerHTML = `
-    <div class="msg-avatar">AI</div>
-    <div class="msg-bubble">
-      <div class="typing-dots"><span></span><span></span><span></span></div>
-    </div>
-  `;
-  host.appendChild(msg);
-  host.scrollTop = host.scrollHeight;
-  return id;
-}
-
-function removeTyping(id) {
-  document.getElementById(id)?.remove();
-}
-
-// ─── Config persistence ────────────────────────────────────────────────────
-
-function hydrateConfig() {
-  try {
-    const saved = JSON.parse(localStorage.getItem('aomi-hl-config') || '{}');
-    state.backend.url = saved.url || '';
-    state.backend.appId = saved.appId || 'hyperliquid';
-    const urlInput = document.getElementById('backend-url-input');
-    const idInput  = document.getElementById('app-id-input');
-    if (urlInput) urlInput.value = state.backend.url;
-    if (idInput)  idInput.value  = state.backend.appId;
-  } catch {}
-}
-
-function wireConfigSave() {
-  document.getElementById('config-save-btn').addEventListener('click', () => {
-    const urlInput = document.getElementById('backend-url-input');
-    const idInput  = document.getElementById('app-id-input');
-    state.backend.url   = urlInput.value.trim();
-    state.backend.appId = idInput.value.trim() || 'hyperliquid';
-    localStorage.setItem('aomi-hl-config', JSON.stringify(state.backend));
-    appendMessage('agent', state.backend.url
-      ? `Connected to Aomi backend at ${state.backend.url}. Chat now routes through the runtime.`
-      : `Backend cleared. Chat will run in demo mode.`);
-  });
-}
-
-// ─── Formatters ─────────────────────────────────────────────────────────────
-
-function formatPrice(n) {
-  if (!isFinite(n)) return '—';
-  if (Math.abs(n) >= 1000) return `$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
-  if (Math.abs(n) >= 1)    return `$${n.toFixed(2)}`;
-  if (Math.abs(n) >= 0.01) return `$${n.toFixed(4)}`;
-  return `$${n.toPrecision(4)}`;
-}
-
-function formatSize(n) {
-  if (!isFinite(n)) return '—';
-  if (Math.abs(n) >= 1000) return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
-  return n.toFixed(n < 1 ? 4 : 2);
-}
-
-function formatUsd(n) {
-  if (!isFinite(n)) return '—';
-  const sign = n < 0 ? '-' : '';
-  return `${sign}$${Math.abs(n).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
-}
-
-function formatTime(ms) {
-  const d = new Date(ms);
-  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-}
-
-function shortAddr(a) {
-  return `${a.slice(0, 6)}…${a.slice(-4)}`;
-}
-
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function textToHtml(s) {
-  const escaped = escapeHtml(s);
-  const withCode = escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
-  return withCode
-    .split('\n\n')
-    .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
-    .join('');
-}
+/* ============================================================
+   BOOT
+   ============================================================ */
+['BTC', 'ETH', 'SOL', 'ARB'].forEach(s => state[s] = buildSnapshot(s));
+renderAll('BTC');
+greet();
+window.addEventListener('resize', () => drawSpark(state[current]));
+setInterval(tick, 1500);

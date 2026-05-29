@@ -1,220 +1,197 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="Hyperliquid Trading Intelligence — an Aomi sample app demonstrating AI-powered market data on the Hyperliquid perpetual DEX." />
-  <title>Hyperliquid × Aomi — Trading Intelligence</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css" />
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hyperliquid × Aomi — Trading Intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+<link rel="stylesheet" href="style.css" />
 </head>
 <body>
+<div class="app">
 
-  <!-- ── NAV ─────────────────────────────────────────────────────── -->
-  <nav class="nav" id="main-nav">
-    <div class="nav-left">
-      <div class="logo">
-        <span class="logo-aomi">aomi</span>
-        <span class="logo-sep">×</span>
-        <span class="logo-hl">Hyperliquid</span>
+  <!-- ============ LEFT: market dashboard ============ -->
+  <main class="dashboard" data-screen-label="Dashboard">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+            <path d="M5 13.5 L12 4 L19 13.5 L12 20 Z" fill="currentColor" opacity="0.92"/>
+            <path d="M12 4 L19 13.5 L12 11 Z" fill="#06281f" opacity="0.35"/>
+          </svg>
+        </span>
+        <span class="brand-name">Hyperliquid</span>
+        <span class="brand-sep">·</span>
+        <span class="brand-sub">Trading Intelligence</span>
       </div>
-      <span class="badge">Sample App</span>
-    </div>
 
-    <div class="asset-tabs" id="asset-tabs" role="tablist">
-      <button class="asset-tab active" data-coin="BTC" role="tab" aria-selected="true">BTC</button>
-      <button class="asset-tab"        data-coin="ETH" role="tab" aria-selected="false">ETH</button>
-      <button class="asset-tab"        data-coin="SOL" role="tab" aria-selected="false">SOL</button>
-      <button class="asset-tab"        data-coin="ARB" role="tab" aria-selected="false">ARB</button>
-    </div>
+      <nav class="asset-tabs" id="assetTabs" aria-label="Markets">
+        <button class="asset-tab is-active" data-asset="BTC">BTC</button>
+        <button class="asset-tab" data-asset="ETH">ETH</button>
+        <button class="asset-tab" data-asset="SOL">SOL</button>
+        <button class="asset-tab" data-asset="ARB">ARB</button>
+      </nav>
 
-    <div class="nav-wallet">
-      <input
-        id="nav-wallet-input"
-        class="nav-wallet-input"
-        type="text"
-        placeholder="0x… wallet"
-        aria-label="Wallet address"
-        spellcheck="false"
-      />
-      <button class="nav-wallet-btn" id="nav-wallet-btn" aria-label="Look up wallet">Look up</button>
-    </div>
+      <form class="wallet-lookup" id="walletForm" autocomplete="off">
+        <span class="wl-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+        </span>
+        <input type="text" id="walletInput" placeholder="Look up wallet 0x…" spellcheck="false" />
+      </form>
+    </header>
 
-    <div class="nav-right">
-      <div class="status-dot" id="status-dot" title="Connection status"></div>
-      <span class="status-label" id="status-label">Connecting…</span>
-    </div>
-  </nav>
+    <div class="dash-scroll">
 
-  <!-- ── MAIN LAYOUT ─────────────────────────────────────────────── -->
-  <main class="layout" id="main-layout">
-
-    <!-- LEFT: Market Dashboard -->
-    <section class="market-panel" id="market-panel" aria-label="Market data">
-
-      <!-- Price Hero -->
-      <div class="price-hero card" id="price-hero">
-        <div class="price-hero-left">
-          <div class="coin-label" id="hero-coin">BTC</div>
-          <div class="price-value" id="hero-price">—</div>
-          <div class="price-change" id="hero-change">
-            <span class="change-arrow" id="change-arrow">—</span>
-            <span class="change-pct" id="change-pct">—</span>
-            <span class="change-label">24h</span>
+      <!-- price hero -->
+      <section class="card hero" id="card-price" data-tool="get_all_mids">
+        <div class="hero-left">
+          <div class="hero-meta">
+            <span class="hero-asset" id="heroAsset">BTC-PERP</span>
+            <span class="hero-venue">Hyperliquid perpetual</span>
+          </div>
+          <div class="hero-price" id="heroPrice">—</div>
+          <div class="hero-row">
+            <span class="pill" id="heroChange">—</span>
+            <span class="hero-sub">24h</span>
           </div>
         </div>
-        <div class="price-hero-right">
-          <canvas id="sparkline" width="220" height="64" aria-label="24-hour price sparkline"></canvas>
+        <div class="hero-right">
+          <canvas class="spark" id="spark" width="420" height="120"></canvas>
+          <div class="spark-axis">
+            <span id="sparkLo">—</span>
+            <span id="sparkHi">—</span>
+          </div>
         </div>
-      </div>
+      </section>
 
-      <!-- Stats Row -->
-      <div class="stats-row">
-        <div class="stat-card card" id="stat-funding">
-          <div class="stat-label">Funding Rate</div>
-          <div class="stat-value" id="funding-value">—</div>
-          <div class="stat-sub" id="funding-direction">—</div>
+      <!-- stat row -->
+      <section class="stat-row">
+        <div class="card stat" id="card-funding" data-tool="get_funding_history">
+          <div class="stat-label">Funding rate <span class="stat-tag">1h</span></div>
+          <div class="stat-value" id="statFunding">—</div>
+          <div class="stat-foot" id="statFundingFoot">—</div>
         </div>
-        <div class="stat-card card" id="stat-mark">
-          <div class="stat-label">Mark Price</div>
-          <div class="stat-value" id="mark-value">—</div>
-          <div class="stat-sub">Mid Price</div>
+        <div class="card stat" id="card-mark" data-tool="get_all_mids">
+          <div class="stat-label">Mark price</div>
+          <div class="stat-value" id="statMark">—</div>
+          <div class="stat-foot" id="statMarkFoot">Oracle index</div>
         </div>
-        <div class="stat-card card" id="stat-spread">
+        <div class="card stat" id="card-spread" data-tool="get_l2_book">
           <div class="stat-label">Spread</div>
-          <div class="stat-value" id="spread-value">—</div>
-          <div class="stat-sub">Best bid/ask</div>
+          <div class="stat-value" id="statSpread">—</div>
+          <div class="stat-foot" id="statSpreadFoot">Best bid / ask</div>
         </div>
-      </div>
+      </section>
 
-      <!-- Order Book -->
-      <div class="orderbook card" id="orderbook">
-        <div class="card-header">
-          <span class="card-title">Order Book</span>
-          <span class="card-sub" id="ob-coin">BTC-PERP</span>
+      <!-- order book -->
+      <section class="card book" id="card-book" data-tool="get_l2_book">
+        <div class="card-head">
+          <h2 class="card-title">Order book</h2>
+          <span class="card-note" id="bookNote">L2 · 12 levels</span>
         </div>
-        <div class="ob-columns">
-          <div class="ob-col asks-col" id="asks-col">
-            <div class="ob-header"><span>Price</span><span>Size</span></div>
-            <div class="ob-rows" id="asks-rows"></div>
+        <div class="book-grid">
+          <div class="book-colhead">
+            <span>Price (USD)</span><span>Size</span><span>Total</span>
           </div>
-          <div class="ob-divider">
-            <span class="ob-mid" id="ob-mid-price">—</span>
+          <div class="book-side asks" id="bookAsks"></div>
+          <div class="book-mid" id="bookMid">
+            <span class="mid-price" id="midPrice">—</span>
+            <span class="mid-label">mid · spread <em id="midSpread">—</em></span>
           </div>
-          <div class="ob-col bids-col" id="bids-col">
-            <div class="ob-header"><span>Price</span><span>Size</span></div>
-            <div class="ob-rows" id="bids-rows"></div>
-          </div>
+          <div class="book-side bids" id="bookBids"></div>
         </div>
-      </div>
+      </section>
 
-      <!-- Funding Rate Chart -->
-      <div class="funding-chart card" id="funding-chart-card">
-        <div class="card-header">
-          <span class="card-title">Funding Rate — 24h</span>
-          <span class="card-sub" id="funding-chart-coin">BTC</span>
+      <!-- funding chart -->
+      <section class="card fchart" id="card-fchart" data-tool="get_funding_history">
+        <div class="card-head">
+          <h2 class="card-title">Funding history</h2>
+          <span class="card-note">24h · paid hourly</span>
         </div>
-        <canvas id="funding-canvas" width="600" height="100" aria-label="24-hour funding rate chart"></canvas>
-        <div class="funding-legend">
-          <span class="legend-item positive">Positive (longs pay shorts)</span>
-          <span class="legend-item negative">Negative (shorts pay longs)</span>
+        <div class="fchart-body">
+          <div class="fchart-zero" aria-hidden="true"></div>
+          <div class="fchart-bars" id="fchartBars"></div>
         </div>
-      </div>
-
-      <!-- Wallet Lookup Results -->
-      <div class="wallet-panel card" id="wallet-panel">
-        <div class="card-header">
-          <span class="card-title">Account Lookup</span>
-          <span class="card-sub" id="wallet-card-sub">Positions &amp; Fills</span>
+        <div class="fchart-axis">
+          <span>−24h</span><span>now</span>
         </div>
-        <div class="wallet-results" id="wallet-results">
-          <div class="wallet-placeholder">Enter a wallet address in the top bar to view positions and trade history.</div>
+      </section>
+
+      <!-- account lookup result -->
+      <section class="card account" id="card-account" data-tool="get_user_state" hidden>
+        <div class="card-head">
+          <h2 class="card-title">Account</h2>
+          <span class="card-note mono" id="acctAddr">—</span>
         </div>
-      </div>
+        <div class="acct-summary" id="acctSummary"></div>
+        <div class="acct-positions" id="acctPositions"></div>
+      </section>
 
-    </section>
-
-    <!-- RIGHT: Aomi AI Agent -->
-    <aside class="agent-panel" id="agent-panel" aria-label="Aomi AI agent">
-      <div class="agent-header">
-        <div class="agent-title-row">
-          <div class="agent-logo-mark">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#7c3aed" stroke-width="2"/><path d="M8 12h8M12 8v8" stroke="#7c3aed" stroke-width="2" stroke-linecap="round"/></svg>
-          </div>
-          <span class="agent-title">Trading Intelligence</span>
-        </div>
-        <span class="agent-powered">powered by Aomi</span>
-      </div>
-
-      <div class="chat-messages" id="chat-messages" role="log" aria-live="polite" aria-label="Chat messages">
-        <div class="msg msg-agent" id="welcome-msg">
-          <div class="msg-avatar">AI</div>
-          <div class="msg-bubble">
-            <p>Hello. I'm your Hyperliquid Trading Intelligence agent, running on the Aomi runtime.</p>
-            <p>I can read live market data directly from Hyperliquid — prices, order books, funding rates, candles, and account positions. Try asking me:</p>
-            <ul>
-              <li>"What's the BTC funding rate trend today?"</li>
-              <li>"Show me the ETH order book depth"</li>
-              <li>"What assets have the highest funding rates right now?"</li>
-              <li>"Look up positions for 0x…"</li>
-            </ul>
-            <p class="msg-note">This is an Aomi sample app. Connect a backend URL in the config to use the live AI agent — or explore the demo mode below.</p>
-          </div>
-        </div>
-      </div>
-
-      <div class="chat-suggestions" id="chat-suggestions">
-        <button class="suggestion" data-prompt="What are the current mid-prices for BTC, ETH and SOL?">BTC / ETH / SOL prices</button>
-        <button class="suggestion" data-prompt="Show me the BTC funding rate trend over the last 24 hours">BTC funding trend</button>
-        <button class="suggestion" data-prompt="What does the ETH order book look like right now?">ETH order book</button>
-        <button class="suggestion" data-prompt="Which perpetuals have the most extreme funding rates?">Top funding rates</button>
-      </div>
-
-      <div class="chat-input-row" id="chat-input-row">
-        <textarea
-          id="chat-input"
-          class="chat-input"
-          placeholder="Ask about prices, positions, funding rates…"
-          rows="1"
-          aria-label="Chat input"
-        ></textarea>
-        <button class="send-btn" id="send-btn" aria-label="Send message">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M22 2L11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-      </div>
-
-      <div class="agent-config" id="agent-config">
-        <details>
-          <summary class="config-toggle">Configure Aomi backend</summary>
-          <div class="config-body">
-            <label class="config-label" for="backend-url-input">Backend URL</label>
-            <input
-              id="backend-url-input"
-              class="config-input"
-              type="url"
-              placeholder="https://api.aomi.dev"
-              aria-label="Aomi backend URL"
-            />
-            <label class="config-label" for="app-id-input">App ID</label>
-            <input
-              id="app-id-input"
-              class="config-input"
-              type="text"
-              placeholder="hyperliquid"
-              value="hyperliquid"
-              aria-label="Aomi app ID"
-            />
-            <button class="config-save-btn" id="config-save-btn">Connect</button>
-            <p class="config-note">The Aomi backend routes your chat messages to the Hyperliquid plugin loaded in the runtime. Without a backend URL, the agent runs in demo mode — all market data still loads live from Hyperliquid directly.</p>
-          </div>
-        </details>
-      </div>
-    </aside>
-
+    </div>
   </main>
 
-  <script src="app.js"></script>
+  <!-- ============ RIGHT: Aomi agent ============ -->
+  <aside class="agent" data-screen-label="Agent">
+    <header class="agent-head">
+      <div class="agent-id">
+        <span class="agent-mark" aria-hidden="true">
+          <svg viewBox="360 360 360 360" width="28" height="28" fill="none">
+            <path d="M680.778 453.235C680.778 423.405 656.595 399.222 626.765 399.222C596.935 399.222 572.752 423.405 572.752 453.235C572.752 483.065 596.935 507.248 626.765 507.248C656.595 507.248 680.778 483.065 680.778 453.235ZM721 453.235C721 505.279 678.81 547.47 626.765 547.47C574.721 547.47 532.53 505.279 532.53 453.235C532.53 401.19 574.721 359 626.765 359C678.81 359 721 401.19 721 453.235Z" fill="currentColor"/>
+            <path d="M540 359C543.792 359 547.556 359.116 551.289 359.346C548.506 361.745 545.833 364.269 543.28 366.91C529.997 379.759 519.669 395.645 513.42 413.451C454.768 425.708 410.714 477.709 410.714 540C410.714 611.403 468.597 669.286 540 669.286C602.292 669.286 654.291 625.231 666.547 566.58C684.364 560.327 700.259 549.99 713.113 536.695C715.745 534.149 718.261 531.486 720.653 528.71C720.883 532.444 721 536.208 721 540C721 639.964 639.964 721 540 721C440.036 721 359 639.964 359 540C359 440.036 440.036 359 540 359Z" fill="currentColor"/>
+          </svg>
+        </span>
+        <div class="agent-titles">
+          <span class="agent-title">Trading Intelligence</span>
+          <span class="agent-by">powered by <strong>Aomi</strong></span>
+        </div>
+      </div>
+      <span class="agent-status" id="agentStatus"><i></i>online</span>
+    </header>
+
+    <div class="chat-log" id="chatLog"></div>
+
+    <div class="agent-foot">
+      <div class="suggestions" id="chips"></div>
+      <form class="composer" id="composer" autocomplete="off">
+        <input type="text" id="chatInput" placeholder="Ask about any market…" spellcheck="false" />
+        <button type="submit" class="send" id="sendBtn" aria-label="Send">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h13"/><path d="m12 5 7 7-7 7"/></svg>
+        </button>
+      </form>
+      <details class="config">
+        <summary>
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.2.61.78 1 1.42 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+          Configure Aomi backend
+        </summary>
+        <div class="config-body">
+          <label class="field">
+            <span>Endpoint</span>
+            <input type="text" value="https://api.aomi.dev/v1/agent" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>Model</span>
+            <select>
+              <option>claude-sonnet-4-6</option>
+              <option>claude-opus-4-1</option>
+              <option>claude-haiku-4</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>API key</span>
+            <input type="password" value="sk-aomi-••••••••••••" spellcheck="false" />
+          </label>
+          <div class="config-actions">
+            <span class="config-hint">Demo runs on synthetic Hyperliquid data.</span>
+            <button type="button" class="btn-ghost">Save</button>
+          </div>
+        </div>
+      </details>
+    </div>
+  </aside>
+
+</div>
+<script src="app.js"></script>
 </body>
 </html>
