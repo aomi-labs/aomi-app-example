@@ -1,0 +1,7 @@
+[app]
+name = "hyperliquid"
+display_name = "Hyperliquid Trading Intelligence"
+platform = "community"
+git = "https://github.com/aomi-labs/community-apps"
+public = true
+server_tags = ["staging"]

@@ -1,0 +1,26 @@
+# Rust
+/app/target/
+**/*.rs.bk
+
+# Aomi deploy state (regenerated per deploy)
+.aomi/
+**/.aomi/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Node (in case anyone npm/pnpms anything in ui/ later)
+node_modules/
+dist/
+.next/
+
+# Env
+.env
+.env.local
+*.local
